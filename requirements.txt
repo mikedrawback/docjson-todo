@@ -1,0 +1,5 @@
+git+git://github.com/tomchristie/django-rest-framework.git
+https://www.djangoproject.com/download/1.6b1/tarball/
+pillow==2.1.0
+sorl-thumbnail==11.12
+Markdown==2.3.1
