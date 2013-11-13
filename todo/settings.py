@@ -84,7 +84,7 @@ USE_TZ = True
 
 REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer'
+        'todo.apps.todo.renderers.DocJSONRenderer'
     ]
 }
 

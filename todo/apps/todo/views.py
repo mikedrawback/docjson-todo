@@ -1,4 +1,6 @@
+from collections import OrderedDict
 from django.core.paginator import Paginator
+from django.core.urlresolvers import reverse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.response import Response
@@ -8,102 +10,110 @@ from todo.apps.todo.models import ToDo
 from todo.apps.todo.serializers import ToDoSerializer
 
 
-PAGINATE_BY = 5
-
-
 def get_document(request):
     """
     Returns the DocJSON document for the ToDo API.
     """
-    return {
-        'tabs': {
-            'all': {'_type': 'link', 'href': '/'},
-            'complete': {'_type': 'link', 'href': '/?complete=True'},
-            'incomplete': {'_type': 'link', 'href': '/?complete=False'}
-        },
-        'search': {
-            '_type': 'form',
-            'href': '/',
-            'method': 'GET',
-            'fields': [
-                {'name': 'term', 'required': True}
-            ]
-        },
-        'add_note': {
-            '_type': 'form',
-            'href': '/',
+    queryparams = '?' + request.GET.urlencode() if request.GET else ''
+    (title, notes) = get_todo_notes(request, queryparams)
+
+    return OrderedDict([
+        ('_type', 'document'),
+        ('meta', {
+            'url': request.build_absolute_uri('/') + queryparams,
+            'title': title
+        }),
+        ('tabs', {
+            'all': {'_type': 'link', 'url': '/'},
+            'complete': {'_type': 'link', 'url': '/?completed=true'},
+            'incomplete': {'_type': 'link', 'url': '/?completed=false'}
+        }),
+        ('create_note', {
+            '_type': 'link',
+            'url': '/' + queryparams,
             'method': 'POST',
             'fields': [
                 {'name': 'text', 'required': True},
                 {'name': 'completed'}
             ]
-        },
-        'notes': get_todo_list(request)
-    }
+        }),
+        ('notes', notes)
+    ])
 
-
-def get_todo_list(request, page_index=1):
+def get_todo_notes(request, queryparams):
     """
-    Returns the DocJSON list for the requested page.
+    Returns the current ToDo items.
     """
     queryset = ToDo.objects.all()
 
     # Apply any filtering to the notes that should be returned.
-    filter_kwargs = {}
-    exclude_kwargs = {}
-    if 'term' in request.GET:
-        filter_kwargs['text__icontains'] = request.GET['term']
-    if 'complete' in request.GET:
-        if request.GET['complete'].lower() == 'true':
-            filter_kwargs['completed'] = True
+    if 'completed' in request.GET:
+        if request.GET['completed'].lower() == 'true':
+            queryset = queryset.filter(completed=True)
+            count = queryset.count()
+            plural = '' if count == 1 else 's'
+            title = 'DocJSON ToDo API (%d complete note%s)' % (count, plural)
         else:
-            exclude_kwargs['completed'] = True
-
-    # Paginate the queryset.
-    queryset = queryset.filter(**filter_kwargs).exclude(**exclude_kwargs)
-    page = Paginator(queryset, PAGINATE_BY).page(page_index)
-
-    # Determine the link to the next page, if applicable.
-    if page.has_next():
-        next_url = reverse('todo-list') + '?page=%d' % (page_index + 1)
+            queryset = queryset.exclude(completed=True)
+            count = queryset.count()
+            plural = '' if count == 1 else 's'
+            title = 'DocJSON ToDo API (%d incomplete note%s)' % (count, plural)
     else:
-        next_url = None
+        count = queryset.count()
+        plural = '' if count == 1 else 's'
+        title = 'DocJSON ToDo API (%d note%s)' % (count, plural)
 
-    # Return a DocJSON list.
+    # Return the list of notes.
+    notes = [
+        OrderedDict([
+            ('text', item.text),
+            ('completed', item.completed),
+            ('edit', {
+                '_type': 'link',
+                'url': reverse('todo-item', kwargs={'pk': item.pk}) + queryparams,
+                'method': 'PATCH',
+                'fields': [{'name': 'text'}, {'name': 'completed'}]
+            }),
+            ('delete', {
+                '_type': 'link',
+                'url': reverse('todo-item', kwargs={'pk': item.pk}) + queryparams,
+                'method': 'DELETE'
+            })
+        ]) for item in queryset
+    ]
+
+    return (title, notes)
+
+def get_error_document(error_dict):
+    message = '\n'.join([
+        '%s - %s' % (field_name, ', '.join(error_list))
+        for field_name, error_list in error_dict.items()
+    ])
+
     return {
-        '_type': 'list',
-        'next': next_url,
-        'items': [
-            {
-                'text': todo.text,
-                'completed': todo.completed,
-                'delete': {
-                    '_type': 'form',
-                    'method': 'DELETE',
-                    'href': reverse('todo-item', kwargs={'pk': todo.pk})
-                },
-                'edit': {
-                    '_type': 'form',
-                    'method': 'PUT',
-                    'href': reverse('todo-item', kwargs={'pk': todo.pk}),
-                    'fields': [{'name': 'text'}, {'name': 'completed'}]
-                }
-            } for todo in page.object_list
-        ]
+        '_type': 'document',
+        'meta': {
+            'error': message
+        }
     }
 
 
 class ToDoList(APIView):
+    def post(self, request):
+        """
+        Create a new ToDo note.
+        """
+        serializer = ToDoSerializer(data=request.DATA)
+        if not serializer.is_valid():
+            return Response(get_error_document(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        return Response(get_document(request))
+
     def get(self, request):
         """
-        Return a paginated list of all the ToDo notes.
+        Return the DocJSON document.
         """
-        try:
-            page_index = int(request.QUERY_PARAMS.get('page', '1'))
-        except ValueError:
-            page_index = 1
-
-        return Response(get_todo_list(request, page_index))
+        return Response(get_document(request))
 
 
 class ToDoItem(APIView):
@@ -118,35 +128,13 @@ class ToDoItem(APIView):
         instance.delete()
         return Response(get_document(request))
 
-    def put(self, request, pk):
+    def patch(self, request, pk):
         """
         Update an existing ToDo note.
         """
         instance = self.get_instance(pk)
         serializer = ToDoSerializer(instance, data=request.DATA, partial=True)
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(get_error_document(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
         serializer.save()
-        return Response(get_document(request))
-
-
-class ToDoRoot(APIView):
-    def post(self, request):
-        """
-        Create a new ToDo note.
-        """
-        try:
-            serializer = ToDoSerializer(data=request.DATA)
-            if not serializer.is_valid():
-                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            serializer.save()
-            return Response(get_document(request))
-        except:
-            import traceback
-            traceback.print_exc()
-
-    def get(self, request):
-        """
-        Return the DocJSON document.
-        """
         return Response(get_document(request))
